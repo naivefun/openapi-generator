@@ -20,7 +20,8 @@ package org.openapitools.codegen;
 import java.util.*;
 
 public class CodegenProperty implements Cloneable {
-    public String baseName, complexType, getter, setter, description, dataType,
+    public String baseName, complexType, getter, setter, description,
+            dataType,
             datatypeWithEnum, dataFormat, name, min, max, defaultValue, defaultValueWithParam,
             baseType, containerType, title;
 
