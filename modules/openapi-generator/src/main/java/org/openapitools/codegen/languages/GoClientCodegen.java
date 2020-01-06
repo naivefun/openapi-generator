@@ -33,8 +33,11 @@ public class GoClientCodegen extends AbstractGoCodegen {
     protected String packageVersion = "1.0.0";
     protected String apiDocPath = "docs/";
     protected String modelDocPath = "docs/";
+    protected boolean isGoSubmodule = false;
     public static final String WITH_GO_CODEGEN_COMMENT = "withGoCodegenComment";
     public static final String WITH_XML = "withXml";
+    public static final String STRUCT_PREFIX = "structPrefix";
+    public static final String WITH_AWSV4_SIGNATURE = "withAWSV4Signature";
 
     public GoClientCodegen() {
         super();
@@ -51,18 +54,18 @@ public class GoClientCodegen extends AbstractGoCodegen {
         // default HIDE_GENERATION_TIMESTAMP to true
         hideGenerationTimestamp = Boolean.TRUE;
 
-        cliOptions.add(new CliOption(CodegenConstants.PACKAGE_VERSION, "Go package version.")
-                .defaultValue("1.0.0"));
+        cliOptions.add(CliOption.newBoolean(CodegenConstants.IS_GO_SUBMODULE, CodegenConstants.IS_GO_SUBMODULE_DESC));
         cliOptions.add(CliOption.newBoolean(WITH_GO_CODEGEN_COMMENT, "whether to include Go codegen comment to disable Go Lint and collapse by default GitHub in PRs and diffs"));
         cliOptions.add(CliOption.newBoolean(WITH_XML, "whether to include support for application/xml content type and include XML annotations in the model (works with libraries that provide support for JSON and XML)"));
-
+        cliOptions.add(CliOption.newBoolean(CodegenConstants.ENUM_CLASS_PREFIX, CodegenConstants.ENUM_CLASS_PREFIX_DESC));
+        cliOptions.add(CliOption.newBoolean(STRUCT_PREFIX, "whether to prefix struct with the class name. e.g. DeletePetOpts => PetApiDeletePetOpts"));
+        cliOptions.add(CliOption.newBoolean(WITH_AWSV4_SIGNATURE, "whether to include AWS v4 signature support"));
 
         // option to change the order of form/body parameter
         cliOptions.add(CliOption.newBoolean(
                 CodegenConstants.PREPEND_FORM_OR_BODY_PARAMETERS,
                 CodegenConstants.PREPEND_FORM_OR_BODY_PARAMETERS_DESC)
                 .defaultValue(Boolean.FALSE.toString()));
-
     }
 
     @Override
@@ -97,6 +100,8 @@ public class GoClientCodegen extends AbstractGoCodegen {
         supportingFiles.add(new SupportingFile("configuration.mustache", "", "configuration.go"));
         supportingFiles.add(new SupportingFile("client.mustache", "", "client.go"));
         supportingFiles.add(new SupportingFile("response.mustache", "", "response.go"));
+        supportingFiles.add(new SupportingFile("go.mod.mustache", "", "go.mod"));
+        supportingFiles.add(new SupportingFile("go.sum", "", "go.sum"));
         supportingFiles.add(new SupportingFile(".travis.yml", "", ".travis.yml"));
 
         if (additionalProperties.containsKey(WITH_GO_CODEGEN_COMMENT)) {
@@ -106,10 +111,38 @@ public class GoClientCodegen extends AbstractGoCodegen {
             }
         }
 
+        if (additionalProperties.containsKey(WITH_AWSV4_SIGNATURE)) {
+            setWithAWSV4Signature(Boolean.parseBoolean(additionalProperties.get(WITH_AWSV4_SIGNATURE).toString()));
+            if (withAWSV4Signature) {
+                additionalProperties.put(WITH_AWSV4_SIGNATURE, "true");
+            }
+        }
+
         if (additionalProperties.containsKey(WITH_XML)) {
             setWithXml(Boolean.parseBoolean(additionalProperties.get(WITH_XML).toString()));
             if (withXml) {
                 additionalProperties.put(WITH_XML, "true");
+            }
+        }
+
+        if (additionalProperties.containsKey(CodegenConstants.ENUM_CLASS_PREFIX)) {
+            setEnumClassPrefix(Boolean.parseBoolean(additionalProperties.get(CodegenConstants.ENUM_CLASS_PREFIX).toString()));
+            if (enumClassPrefix) {
+                additionalProperties.put(CodegenConstants.ENUM_CLASS_PREFIX, "true");
+            }
+        }
+
+        if (additionalProperties.containsKey(CodegenConstants.IS_GO_SUBMODULE)) {
+            setIsGoSubmodule(Boolean.parseBoolean(additionalProperties.get(CodegenConstants.IS_GO_SUBMODULE).toString()));
+            if (isGoSubmodule) {
+                additionalProperties.put(CodegenConstants.IS_GO_SUBMODULE, "true");
+            }
+        }
+
+        if (additionalProperties.containsKey(STRUCT_PREFIX)) {
+            setStructPrefix(Boolean.parseBoolean(additionalProperties.get(STRUCT_PREFIX).toString()));
+            if (structPrefix) {
+                additionalProperties.put(STRUCT_PREFIX, "true");
             }
         }
     }
@@ -183,6 +216,10 @@ public class GoClientCodegen extends AbstractGoCodegen {
 
     public void setPackageVersion(String packageVersion) {
         this.packageVersion = packageVersion;
+    }
+
+    public void setIsGoSubmodule(boolean isGoSubmodule) {
+        this.isGoSubmodule = isGoSubmodule;
     }
 
 }

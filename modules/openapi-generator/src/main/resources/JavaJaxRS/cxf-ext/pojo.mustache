@@ -17,12 +17,12 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 {{^hasVars}}@XmlType(name = "{{classname}}"){{/hasVars}}
 {{^parent}}@XmlRootElement(name="{{classname}}"){{/parent}}
 {{/withXml}}
-{{#description}}
+{{#discriminator}}{{>typeInfoAnnotation}}{{/discriminator}}{{#description}}
 /**
  * {{{description}}}
  */
 @ApiModel(description="{{{description}}}")
-{{/description}}
+{{/description}}{{>additionalModelTypeAnnotations}}
 public class {{classname}} {{#parent}}extends {{{parent}}}{{/parent}}{{#serializableModel}} implements Serializable{{/serializableModel}} {
   {{#vars}}{{#isEnum}}{{^isContainer}}
 {{>enumClass}}{{/isContainer}}{{#isContainer}}{{#mostInnerItems}}

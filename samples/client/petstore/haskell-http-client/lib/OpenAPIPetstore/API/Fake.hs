@@ -82,11 +82,11 @@ instance HasBodyParam CreateXmlItem XmlItem
 -- | @application/xml@
 instance Consumes CreateXmlItem MimeXML
 -- | @text/xml@
-instance Consumes CreateXmlItem MimeTextxml
+instance Consumes CreateXmlItem MimeTextXml
 -- | @text/xml; charset=utf-8@
-instance Consumes CreateXmlItem MimeTextxmlCharsetutf8
+instance Consumes CreateXmlItem MimeTextXmlCharsetutf8
 -- | @text/xml; charset=utf-16@
-instance Consumes CreateXmlItem MimeTextxmlCharsetutf16
+instance Consumes CreateXmlItem MimeTextXmlCharsetutf16
 -- | @application/xml; charset=utf-8@
 instance Consumes CreateXmlItem MimeXmlCharsetutf8
 -- | @application/xml; charset=utf-16@
@@ -503,4 +503,29 @@ data TestJsonFormData
 instance Consumes TestJsonFormData MimeFormUrlEncoded
 
 instance Produces TestJsonFormData MimeNoContent
+
+
+-- *** testQueryParameterCollectionFormat
+
+-- | @PUT \/fake\/test-query-paramters@
+-- 
+-- To test the collection format in query parameters
+-- 
+testQueryParameterCollectionFormat 
+  :: Pipe -- ^ "pipe"
+  -> Ioutil -- ^ "ioutil"
+  -> Http -- ^ "http"
+  -> Url -- ^ "url"
+  -> Context -- ^ "context"
+  -> OpenAPIPetstoreRequest TestQueryParameterCollectionFormat MimeNoContent NoContent MimeNoContent
+testQueryParameterCollectionFormat (Pipe pipe) (Ioutil ioutil) (Http http) (Url url) (Context context) =
+  _mkRequest "PUT" ["/fake/test-query-paramters"]
+    `setQuery` toQueryColl CommaSeparated ("pipe", Just pipe)
+    `setQuery` toQueryColl CommaSeparated ("ioutil", Just ioutil)
+    `setQuery` toQueryColl SpaceSeparated ("http", Just http)
+    `setQuery` toQueryColl CommaSeparated ("url", Just url)
+    `setQuery` toQueryColl MultiParamArray ("context", Just context)
+
+data TestQueryParameterCollectionFormat  
+instance Produces TestQueryParameterCollectionFormat MimeNoContent
 

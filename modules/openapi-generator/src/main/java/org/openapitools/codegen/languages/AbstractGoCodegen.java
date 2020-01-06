@@ -35,11 +35,16 @@ import static org.openapitools.codegen.utils.StringUtils.underscore;
 public abstract class AbstractGoCodegen extends DefaultCodegen implements CodegenConfig {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(AbstractGoCodegen.class);
+    private static final String NUMERIC_ENUM_PREFIX = "_";
 
     protected boolean withGoCodegenComment = false;
+    protected boolean withAWSV4Signature = false;
     protected boolean withXml = false;
+    protected boolean enumClassPrefix = false;
+    protected boolean structPrefix = false;
 
     protected String packageName = "openapi";
+    protected Set<String> numberTypes;
 
     public AbstractGoCodegen() {
         super();
@@ -95,9 +100,11 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
         typeMapping.put("number", "float32");
         typeMapping.put("float", "float32");
         typeMapping.put("double", "float64");
+        typeMapping.put("BigDecimal", "float64");
         typeMapping.put("boolean", "bool");
         typeMapping.put("string", "string");
         typeMapping.put("UUID", "string");
+        typeMapping.put("URI", "string");
         typeMapping.put("date", "string");
         typeMapping.put("DateTime", "time.Time");
         typeMapping.put("password", "string");
@@ -107,12 +114,20 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
         typeMapping.put("ByteArray", "string");
         typeMapping.put("object", "map[string]interface{}");
 
+        numberTypes = new HashSet<String>(
+                Arrays.asList(
+                        "uint", "uint8", "uint16", "uint32", "uint64",
+                        "int", "int8", "int16", "int32", "int64",
+                        "float32", "float64")
+        );
+
         importMapping = new HashMap<String, String>();
 
         cliOptions.clear();
         cliOptions.add(new CliOption(CodegenConstants.PACKAGE_NAME, "Go package name (convention: lowercase).")
                 .defaultValue("openapi"));
-
+        cliOptions.add(new CliOption(CodegenConstants.PACKAGE_VERSION, "Go package version.")
+                .defaultValue("1.0.0"));
         cliOptions.add(new CliOption(CodegenConstants.HIDE_GENERATION_TIMESTAMP, CodegenConstants.HIDE_GENERATION_TIMESTAMP_DESC)
                 .defaultValue(Boolean.TRUE.toString()));
     }
@@ -265,10 +280,10 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
         if (ModelUtils.isArraySchema(p)) {
             ArraySchema ap = (ArraySchema) p;
             Schema inner = ap.getItems();
-            return "[]" + getTypeDeclaration(inner);
+            return "[]" + getTypeDeclaration(ModelUtils.unaliasSchema(this.openAPI, inner));
         } else if (ModelUtils.isMapSchema(p)) {
             Schema inner = ModelUtils.getAdditionalProperties(p);
-            return getSchemaType(p) + "[string]" + getTypeDeclaration(inner);
+            return getSchemaType(p) + "[string]" + getTypeDeclaration(ModelUtils.unaliasSchema(this.openAPI, inner));
         }
         //return super.getTypeDeclaration(p);
 
@@ -359,10 +374,10 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
                 iterator.remove();
         }
 
-        // this will only import "fmt" if there are items in pathParams
+        // this will only import "fmt" and "strings" if there are items in pathParams
         for (CodegenOperation operation : operations) {
             if (operation.pathParams != null && operation.pathParams.size() > 0) {
-                imports.add(createMapping("import", "fmt"));
+                imports.add(createMapping("import", "strings"));
                 break; //just need to import once
             }
         }
@@ -370,7 +385,13 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
         boolean addedOptionalImport = false;
         boolean addedTimeImport = false;
         boolean addedOSImport = false;
+        boolean addedReflectImport = false;
         for (CodegenOperation operation : operations) {
+            // import "os" if the operation uses files
+            if (!addedOSImport && "*os.File".equals(operation.returnType)) {
+                imports.add(createMapping("import", "os"));
+                addedOSImport = true;
+            }
             for (CodegenParameter param : operation.allParams) {
                 // import "os" if the operation uses files
                 if (!addedOSImport && "*os.File".equals(param.dataType)) {
@@ -384,6 +405,12 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
                         imports.add(createMapping("import", "time"));
                         addedTimeImport = true;
                     }
+                }
+
+                // import "reflect" package if the parameter is collectionFormat=multi
+                if (!addedReflectImport && param.isCollectionFormatMulti) {
+                    imports.add(createMapping("import", "reflect"));
+                    addedReflectImport = true;
                 }
 
                 // import "optionals" package if the parameter is optional
@@ -478,7 +505,8 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
             if (v instanceof CodegenModel) {
                 CodegenModel model = (CodegenModel) v;
                 for (CodegenProperty param : model.vars) {
-                    if (!addedTimeImport && "time.Time".equals(param.baseType)) {
+                    if (!addedTimeImport
+                            && ("time.Time".equals(param.dataType) || ("[]time.Time".equals(param.dataType)))) {
                         imports.add(createMapping("import", "time"));
                         addedTimeImport = true;
                     }
@@ -542,10 +570,10 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
 
     @Override
     public String toEnumValue(String value, String datatype) {
-        if ("int".equals(datatype) || "double".equals(datatype) || "float".equals(datatype)) {
+        if (isNumberType(datatype) || "bool".equals(datatype)) {
             return value;
         } else {
-            return escapeText(value);
+            return "\"" + escapeText(value) + "\"";
         }
     }
 
@@ -561,12 +589,12 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
         }
 
         // number
-        if ("int".equals(datatype) || "double".equals(datatype) || "float".equals(datatype)) {
+        if (isNumberType(datatype)) {
             String varName = name;
             varName = varName.replaceAll("-", "MINUS_");
             varName = varName.replaceAll("\\+", "PLUS_");
             varName = varName.replaceAll("\\.", "_DOT_");
-            return varName;
+            return NUMERIC_ENUM_PREFIX + varName;
         }
 
         // for symbol, e.g. $, #
@@ -582,7 +610,7 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
         if (isReservedWord(enumName)) { // reserved word
             return escapeReservedWord(enumName);
         } else if (enumName.matches("\\d.*")) { // starts with a number
-            return "_" + enumName;
+            return NUMERIC_ENUM_PREFIX + enumName;
         } else {
             return enumName;
         }
@@ -596,7 +624,7 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
         enumName = enumName.replace("[]", "");
 
         if (enumName.matches("\\d.*")) { // starts with number
-            return "_" + enumName;
+            return NUMERIC_ENUM_PREFIX + enumName;
         } else {
             return enumName;
         }
@@ -606,8 +634,20 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
         this.withGoCodegenComment = withGoCodegenComment;
     }
 
+    public void setWithAWSV4Signature(boolean withAWSV4Signature) {
+        this.withAWSV4Signature = withAWSV4Signature;
+    }
+
     public void setWithXml(boolean withXml) {
         this.withXml = withXml;
+    }
+
+    public void setEnumClassPrefix(boolean enumClassPrefix) {
+        this.enumClassPrefix = enumClassPrefix;
+    }
+
+    public void setStructPrefix(boolean structPrefix) {
+        this.structPrefix = structPrefix;
     }
 
     @Override
@@ -659,5 +699,9 @@ public abstract class AbstractGoCodegen extends DefaultCodegen implements Codege
                 LOGGER.error("Error running the command ({}). Exception: {}", command, e.getMessage());
             }
         }
+    }
+
+    protected boolean isNumberType(String datatype) {
+        return numberTypes.contains(datatype);
     }
 }

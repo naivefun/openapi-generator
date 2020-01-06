@@ -17,6 +17,7 @@
 
 package org.openapitools.codegen.languages;
 
+import io.swagger.v3.core.util.Json;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.info.Info;
@@ -24,7 +25,8 @@ import io.swagger.v3.oas.models.media.ArraySchema;
 import io.swagger.v3.oas.models.media.FileSchema;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.media.XML;
-import io.swagger.v3.oas.models.parameters.Parameter;
+import io.swagger.v3.oas.models.parameters.RequestBody;
+import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.servers.Server;
 import org.apache.commons.lang3.StringUtils;
 import org.openapitools.codegen.*;
@@ -60,6 +62,14 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
     protected String packageVersion;
     protected String externCrateName;
     protected Map<String, Map<String, String>> pathSetMap = new HashMap<String, Map<String, String>>();
+
+    private static final String uuidType = "uuid::Uuid";
+    private static final String bytesType = "swagger::ByteArray";
+
+    private static final String xmlMimeType = "application/xml";
+    private static final String octetMimeType = "application/octet-stream";
+    private static final String plainMimeType = "text/plain";
+    private static final String jsonMimeType = "application/json";
 
     public RustServerCodegen() {
         super();
@@ -147,16 +157,17 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
         typeMapping.put("float", "f32");
         typeMapping.put("double", "f64");
         typeMapping.put("string", "String");
-        typeMapping.put("UUID", "uuid::Uuid");
+        typeMapping.put("UUID", uuidType);
+        typeMapping.put("URI", "String");
         typeMapping.put("byte", "u8");
-        typeMapping.put("ByteArray", "swagger::ByteArray");
-        typeMapping.put("binary", "swagger::ByteArray");
+        typeMapping.put("ByteArray", bytesType);
+        typeMapping.put("binary", bytesType);
         typeMapping.put("boolean", "bool");
         typeMapping.put("date", "chrono::DateTime<chrono::Utc>");
         typeMapping.put("DateTime", "chrono::DateTime<chrono::Utc>");
         typeMapping.put("password", "String");
-        typeMapping.put("File", "swagger::ByteArray");
-        typeMapping.put("file", "swagger::ByteArray");
+        typeMapping.put("File", bytesType);
+        typeMapping.put("file", bytesType);
         typeMapping.put("array", "Vec");
         typeMapping.put("map", "HashMap");
 
@@ -204,6 +215,10 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
     @Override
     public void processOpts() {
         super.processOpts();
+
+        if (!Boolean.TRUE.equals(ModelUtils.isGenerateAliasAsModel())) {
+            LOGGER.warn("generateAliasAsModel is set to false, which means array/map will be generated as model instead and the resulting code may have issues. Please enable `generateAliasAsModel` to address the issue.");
+        }
 
         setPackageName((String) additionalProperties.getOrDefault(CodegenConstants.PACKAGE_NAME, "openapi_client"));
 
@@ -280,7 +295,7 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
         }
         info.setVersion(StringUtils.join(versionComponents, "."));
 
-        URL url = URLPathUtils.getServerURL(openAPI);
+        URL url = URLPathUtils.getServerURL(openAPI, serverVariableOverrides());
         additionalProperties.put("serverHost", url.getHost());
         additionalProperties.put("serverPort", URLPathUtils.getPort(url, 80));
     }
@@ -475,20 +490,32 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
         return input.replace("*/", "*_/").replace("/*", "/_*");
     }
 
-    boolean isMimetypeXml(String mimetype) {
-        return mimetype.toLowerCase(Locale.ROOT).startsWith("application/xml");
+    private boolean isMimetypeXml(String mimetype) {
+        return mimetype.toLowerCase(Locale.ROOT).startsWith(xmlMimeType);
     }
 
-    boolean isMimetypePlainText(String mimetype) {
-        return mimetype.toLowerCase(Locale.ROOT).startsWith("text/plain");
+    private boolean isMimetypePlainText(String mimetype) {
+        return mimetype.toLowerCase(Locale.ROOT).startsWith(plainMimeType);
     }
 
-    boolean isMimetypeHtmlText(String mimetype) {
+    private boolean isMimetypeHtmlText(String mimetype) {
         return mimetype.toLowerCase(Locale.ROOT).startsWith("text/html");
     }
 
-    boolean isMimetypeWwwFormUrlEncoded(String mimetype) {
+    private boolean isMimetypeWwwFormUrlEncoded(String mimetype) {
         return mimetype.toLowerCase(Locale.ROOT).startsWith("application/x-www-form-urlencoded");
+    }
+
+    private boolean isMimetypeMultipartFormData(String mimetype) {
+        return mimetype.toLowerCase(Locale.ROOT).startsWith("multipart/form-data");
+    }
+
+    private boolean isMimetypeOctetStream(String mimetype) {
+        return mimetype.toLowerCase(Locale.ROOT).startsWith(octetMimeType);
+    }
+
+    private boolean isMimetypePlain(String mimetype) {
+      return isMimetypePlainText(mimetype) || isMimetypeHtmlText(mimetype) || isMimetypeOctetStream(mimetype);
     }
 
     @Override
@@ -542,38 +569,17 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
             processParam(param, op);
         }
 
-        List<String> consumes = new ArrayList<String>();
+        // We keep track of the 'default' model type for this API. If there are
+        // *any* XML responses, then we set the default to XML, otherwise we
+        // let the default be JSON. It would be odd for an API to want to use
+        // both XML and JSON on a single operation, and if we don't know
+        // anything then JSON is a more modern (ergo reasonable) choice.
+        boolean defaultsToXml = false;
 
-        boolean consumesPlainText = false;
-        boolean consumesXml = false;
-        // if "consumes" is defined (per operation or using global definition)
-        if (consumes != null && !consumes.isEmpty()) {
-            consumes.addAll(getConsumesInfo(this.openAPI, operation));
-            List<Map<String, String>> c = new ArrayList<Map<String, String>>();
-            for (String mimeType : consumes) {
-                Map<String, String> mediaType = new HashMap<String, String>();
-
-                if (isMimetypeXml(mimeType)) {
-                    additionalProperties.put("usesXml", true);
-                    consumesXml = true;
-                } else if (isMimetypePlainText(mimeType)) {
-                    consumesPlainText = true;
-                } else if (isMimetypeHtmlText(mimeType)) {
-                    consumesPlainText = true;
-                } else if (isMimetypeWwwFormUrlEncoded(mimeType)) {
-                    additionalProperties.put("usesUrlEncodedForm", true);
-                }
-
-                mediaType.put("mediaType", mimeType);
-                c.add(mediaType);
-            }
-            op.consumes = c;
-            op.hasConsumes = true;
-        }
-
-
-        List<String> produces = new ArrayList<String>(getProducesInfo(this.openAPI, operation));
-
+        // Determine the types that this operation produces. `getProducesInfo`
+        // simply lists all the types, and then we add the correct imports to
+        // the generated library.
+        List<String> produces = new ArrayList<String>(getProducesInfo(openAPI, operation));
         boolean producesXml = false;
         boolean producesPlainText = false;
         if (produces != null && !produces.isEmpty()) {
@@ -583,10 +589,9 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
 
                 if (isMimetypeXml(mimeType)) {
                     additionalProperties.put("usesXml", true);
+                    defaultsToXml = true;
                     producesXml = true;
-                } else if (isMimetypePlainText(mimeType)) {
-                    producesPlainText = true;
-                } else if (isMimetypeHtmlText(mimeType)) {
+                } else if (isMimetypePlain(mimeType)) {
                     producesPlainText = true;
                 }
 
@@ -598,42 +603,138 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
         }
 
         for (CodegenParameter param : op.headerParams) {
-            // If a header uses UUIDs, we need to import the UUID package.
-            if (param.dataType.equals("uuid::Uuid")) {
-                additionalProperties.put("apiUsesUuid", true);
-            }
             processParam(param, op);
 
             // Give header params a name in camel case. CodegenParameters don't have a nameInCamelCase property.
             param.vendorExtensions.put("typeName", toModelName(param.baseName));
         }
 
+        // Set for deduplication of response IDs
+        Set<String> responseIds = new HashSet();
+
         for (CodegenResponse rsp : op.responses) {
+
+            // Get the original API response so we get process the schema
+            // directly.
+            ApiResponse original;
+            if (rsp.code == "0") {
+                original = operation.getResponses().get("default");
+            } else {
+                original = operation.getResponses().get(rsp.code);
+            }
             String[] words = rsp.message.split("[^A-Za-z ]");
+
+            // Create a unique responseID for this response.
             String responseId;
+
             if (rsp.vendorExtensions.containsKey("x-responseId")) {
+                // If it's been specified directly, use that.
                 responseId = (String) rsp.vendorExtensions.get("x-responseId");
             } else if (words.length != 0) {
+                // If there's a description, build it from the description.
                 responseId = camelize(words[0].replace(" ", "_"));
             } else {
+                // Otherwise fall back to the http response code.
                 responseId = "Status" + rsp.code;
             }
+
+            // Deduplicate response IDs that would otherwise contain the same
+            // text. We rely on the ID being unique, but since we form it from
+            // the raw description field we can't require that the spec writer
+            // provides unique descriptions.
+            int idTieBreaker = 2;
+            while (responseIds.contains(responseId)) {
+                String trial = String.format(Locale.ROOT, "%s_%d", responseId, idTieBreaker);
+                if (!responseIds.contains(trial)) {
+                    responseId = trial;
+                } else {
+                    idTieBreaker++;
+                }
+            }
+
+            responseIds.add(responseId);
+
             rsp.vendorExtensions.put("x-responseId", responseId);
             rsp.vendorExtensions.put("x-uppercaseResponseId", underscore(responseId).toUpperCase(Locale.ROOT));
             rsp.vendorExtensions.put("uppercase_operation_id", underscore(op.operationId).toUpperCase(Locale.ROOT));
             if (rsp.dataType != null) {
                 rsp.vendorExtensions.put("uppercase_data_type", (rsp.dataType.replace("models::", "")).toUpperCase(Locale.ROOT));
 
-                // Default to producing json if nothing else is specified
+                // Get the mimetype which is produced by this response. Note
+                // that although in general responses produces a set of
+                // different mimetypes currently we only support 1 per
+                // response.
+                String firstProduces = null;
+
+                if (original.getContent() != null) {
+                    for (String mimetype : original.getContent().keySet()) {
+                        firstProduces = mimetype;
+                        break;
+                    }
+                }
+
+                // The output mime type. This allows us to do sensible fallback
+                // to JSON/XML rather than using only the default operation
+                // mimetype.
+                String outputMime;
+
+                if (firstProduces == null) {
+                    if (producesXml) {
+                        outputMime = xmlMimeType;
+                    } else if (producesPlainText) {
+                        if (rsp.dataType.equals(bytesType)) {
+                            outputMime = octetMimeType;
+                        } else {
+                            outputMime = plainMimeType;
+                        }
+                    } else {
+                        outputMime = jsonMimeType;
+                    }
+                } else {
+                    // If we know exactly what mimetype this response is
+                    // going to produce, then use that. If we have not found
+                    // anything, then we'll fall back to the 'producesXXX'
+                    // definitions we worked out above for the operation as a
+                    // whole.
+                    if (isMimetypeXml(firstProduces)) {
+                        producesXml = true;
+                        producesPlainText = false;
+                    } else if (isMimetypePlain(firstProduces)) {
+                        producesXml = false;
+                        producesPlainText = true;
+                    } else {
+                        producesXml = false;
+                        producesPlainText = false;
+                    }
+
+                    outputMime = firstProduces;
+                }
+
+                rsp.vendorExtensions.put("mimeType", outputMime);
+
+                // Write out the type of data we actually expect this response
+                // to make.
                 if (producesXml) {
                     rsp.vendorExtensions.put("producesXml", true);
                 } else if (producesPlainText) {
-                    rsp.vendorExtensions.put("producesPlainText", true);
+                    // Plain text means that there is not structured data in
+                    // this response. So it'll either be a UTF-8 encoded string
+                    // 'plainText' or some generic 'bytes'.
+                    //
+                    // Note that we don't yet distinguish between string/binary
+                    // and string/bytes - that is we don't auto-detect whether
+                    // base64 encoding should be done. They both look like
+                    // 'producesBytes'.
+                    if (rsp.dataType.equals(bytesType)) {
+                        rsp.vendorExtensions.put("producesBytes", true);
+                    } else {
+                        rsp.vendorExtensions.put("producesPlainText", true);
+                    }
                 } else {
                     rsp.vendorExtensions.put("producesJson", true);
-                    // If the data type is just "object", then ensure that the Rust data type
-                    // is "serde_json::Value".  This allows us to define APIs that
-                    // can return arbitrary JSON bodies.
+                    // If the data type is just "object", then ensure that the
+                    // Rust data type is "serde_json::Value".  This allows us
+                    // to define APIs that can return arbitrary JSON bodies.
                     if (rsp.dataType.equals("object")) {
                         rsp.dataType = "serde_json::Value";
                     }
@@ -652,14 +753,14 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
                 }
             }
             for (CodegenProperty header : rsp.headers) {
-                if (header.dataType.equals("uuid::Uuid")) {
+                if (header.dataType.equals(uuidType)) {
                     additionalProperties.put("apiUsesUuid", true);
                 }
                 header.nameInCamelCase = toModelName(header.baseName);
             }
         }
         for (CodegenProperty header : op.responseHeaders) {
-            if (header.dataType.equals("uuid::Uuid")) {
+            if (header.dataType.equals(uuidType)) {
                 additionalProperties.put("apiUsesUuid", true);
             }
             header.nameInCamelCase = toModelName(header.baseName);
@@ -673,7 +774,6 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
         Map<String, Object> operations = (Map<String, Object>) objs.get("operations");
         List<CodegenOperation> operationList = (List<CodegenOperation>) operations.get("operation");
 
-
         for (CodegenOperation op : operationList) {
             boolean consumesPlainText = false;
             boolean consumesXml = false;
@@ -686,10 +786,13 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
                         if (isMimetypeXml(mediaType)) {
                             additionalProperties.put("usesXml", true);
                             consumesXml = true;
-                        } else if (isMimetypePlainText(mediaType) || isMimetypeHtmlText(mediaType)) {
+                        } else if (isMimetypePlain(mediaType)) {
                             consumesPlainText = true;
                         } else if (isMimetypeWwwFormUrlEncoded(mediaType)) {
                             additionalProperties.put("usesUrlEncodedForm", true);
+                        } else if (isMimetypeMultipartFormData(mediaType)) {
+                            op.vendorExtensions.put("consumesMultipart", true);
+                            additionalProperties.put("apiUsesMultipart", true);
                         }
                     }
                 }
@@ -705,8 +808,8 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
                 } else {
                     op.bodyParam.vendorExtensions.put("consumesJson", true);
                 }
-
             }
+
             for (CodegenParameter param : op.bodyParams) {
                 processParam(param, op);
 
@@ -727,10 +830,29 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
             }
 
             for (CodegenProperty header : op.responseHeaders) {
-                if (header.dataType.equals("uuid::Uuid")) {
+                if (header.dataType.equals(uuidType)) {
                     additionalProperties.put("apiUsesUuid", true);
                 }
                 header.nameInCamelCase = toModelName(header.baseName);
+            }
+
+            if (op.authMethods != null) {
+                boolean headerAuthMethods = false;
+
+                for (CodegenSecurity s : op.authMethods) {
+                    if (s.isApiKey && s.isKeyInHeader) {
+                        s.vendorExtensions.put("x-apiKeyName", toModelName(s.keyParamName));
+                        headerAuthMethods = true;
+                    }
+
+                    if (s.isBasicBasic || s.isBasicBearer || s.isOAuth) {
+                        headerAuthMethods = true;
+                    }
+                }
+
+                if (headerAuthMethods) {
+                    op.vendorExtensions.put("hasHeaderAuthMethods", "true");
+                }
             }
         }
 
@@ -742,15 +864,48 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
         return dataType != null && dataType.equals(typeMapping.get("File").toString());
     }
 
+    // This is a really terrible hack. We're working around the fact that the
+    // base version of `fromRequestBody` checks to see whether the body is a
+    // ref. If so, it unwraps the reference and replaces it with its inner
+    // type. This causes problems in rust-server, as it means that we use inner
+    // types in the API, rather than the correct outer type.
+    //
+    // Thus, we grab the inner schema beforehand, and then tinker afterwards to
+    // restore things to sensible values.
+    @Override
+    public CodegenParameter fromRequestBody(RequestBody body, Set<String> imports, String bodyParameterName) {
+        Schema original_schema = ModelUtils.getSchemaFromRequestBody(body);
+        CodegenParameter codegenParameter = super.fromRequestBody(body, imports, bodyParameterName);
+
+        if (StringUtils.isNotBlank(original_schema.get$ref())) {
+            // Undo the mess `super.fromRequestBody` made - re-wrap the inner
+            // type.
+            codegenParameter.dataType = getTypeDeclaration(original_schema);
+            codegenParameter.isPrimitiveType = false;
+            codegenParameter.isListContainer = false;
+            codegenParameter.isString = false;
+            codegenParameter.isByteArray = ModelUtils.isByteArraySchema(original_schema);
+
+
+            // This is a model, so should only have an example if explicitly
+            // defined.
+            if (codegenParameter.vendorExtensions != null && codegenParameter.vendorExtensions.containsKey("x-example")) {
+                codegenParameter.example = Json.pretty(codegenParameter.vendorExtensions.get("x-example"));
+            } else {
+                codegenParameter.example = null;
+            }
+        }
+
+        return codegenParameter;
+    }
+
     @Override
     public String getTypeDeclaration(Schema p) {
         if (ModelUtils.isArraySchema(p)) {
             ArraySchema ap = (ArraySchema) p;
             Schema inner = ap.getItems();
             String innerType = getTypeDeclaration(inner);
-            StringBuilder typeDeclaration = new StringBuilder(typeMapping.get("array")).append("<");
-            typeDeclaration.append(innerType).append(">");
-            return typeDeclaration.toString();
+            return typeMapping.get("array") + "<" + innerType + ">";
         } else if (ModelUtils.isMapSchema(p)) {
             Schema inner = ModelUtils.getAdditionalProperties(p);
             String innerType = getTypeDeclaration(inner);
@@ -779,35 +934,6 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
         return super.getTypeDeclaration(p);
     }
 
-    private boolean isNonPrimitive(CodegenParameter parameter) {
-        return !parameter.isString && !parameter.isNumeric && !parameter.isByteArray &&
-            !parameter.isBinary && !parameter.isFile && !parameter.isBoolean &&
-            !parameter.isDate && !parameter.isDateTime && !parameter.isUuid &&
-            !parameter.isListContainer && !parameter.isMapContainer &&
-            !languageSpecificPrimitives.contains(parameter.dataType);
-    }
-
-    @Override
-    public CodegenParameter fromParameter(Parameter param, Set<String> imports) {
-        CodegenParameter parameter = super.fromParameter(param, imports);
-        if (isNonPrimitive(parameter)) {
-            String name = "models::" + getTypeDeclaration(parameter.dataType);
-            parameter.dataType = name;
-        }
-
-        return parameter;
-    }
-
-    @Override
-    public void postProcessParameter(CodegenParameter parameter) {
-        // If this parameter is not a primitive type, prefix it with "models::"
-        // to ensure it's namespaced correctly in the Rust code.
-        if (isNonPrimitive(parameter)) {
-            String name = "models::" + getTypeDeclaration(parameter.dataType);
-            parameter.dataType = name;
-        }
-    }
-
     @Override
     public String toInstantiationType(Schema p) {
         if (ModelUtils.isArraySchema(p)) {
@@ -833,22 +959,45 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
         }
         if (ModelUtils.isArraySchema(model)) {
             ArraySchema am = (ArraySchema) model;
+            String xmlName = null;
+
+            // Detect XML list where the inner item is defined directly.
             if ((am.getItems() != null) &&
                     (am.getItems().getXml() != null)) {
+                xmlName = am.getItems().getXml().getName();
+            }
 
-                // If this model's items require wrapping in xml, squirrel
-                // away the xml name so we can insert it into the relevant model fields.
-                String xmlName = am.getItems().getXml().getName();
-                if (xmlName != null) {
-                    mdl.vendorExtensions.put("itemXmlName", xmlName);
-                    modelXmlNames.put("models::" + mdl.classname, xmlName);
+            // Detect XML list where the inner item is a reference.
+            if (am.getXml() != null && am.getXml().getWrapped() &&
+                    am.getItems() != null &&
+                    !StringUtils.isEmpty(am.getItems().get$ref())) {
+                Schema inner_schema = allDefinitions.get(
+                    ModelUtils.getSimpleRef(am.getItems().get$ref()));
+
+                if (inner_schema.getXml() != null &&
+                        inner_schema.getXml().getName() != null) {
+                    xmlName = inner_schema.getXml().getName();
                 }
             }
+
+            // If this model's items require wrapping in xml, squirrel away the
+            // xml name so we can insert it into the relevant model fields.
+            if (xmlName != null) {
+                mdl.vendorExtensions.put("itemXmlName", xmlName);
+                modelXmlNames.put("models::" + mdl.classname, xmlName);
+            }
+
             mdl.arrayModelType = toModelName(mdl.arrayModelType);
         }
 
         if (mdl.xmlNamespace != null) {
             additionalProperties.put("usesXmlNamespaces", true);
+        }
+
+        Schema additionalProperties = ModelUtils.getAdditionalProperties(model);
+
+        if (additionalProperties != null) {
+            mdl.additionalPropertiesType = getSchemaType(additionalProperties);
         }
 
         return mdl;
@@ -874,7 +1023,15 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
             String modelName = entry.getKey();
             CodegenModel model = entry.getValue();
 
+            if (uuidType.equals(model.dataType)) {
+                additionalProperties.put("apiUsesUuid", true);
+            }
+
             for (CodegenProperty prop : model.vars) {
+                if (prop.dataType.equals(uuidType)) {
+                    additionalProperties.put("apiUsesUuid", true);
+                }
+
                 String xmlName = modelXmlNames.get(prop.dataType);
                 if (xmlName != null) {
                     prop.vendorExtensions.put("itemXmlName", xmlName);
@@ -1005,22 +1162,22 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
         }
     }
 
-    static long requiredBits(Long bound, boolean unsigned) {
+    private long requiredBits(Long bound, boolean unsigned) {
         if (bound == null) return 0;
 
         if (unsigned) {
             if (bound < 0) {
                 throw new RuntimeException("Unsigned bound is negative: " + bound);
             }
-            return 65 - Long.numberOfLeadingZeros(bound >> 1);
+            return 65L - Long.numberOfLeadingZeros(bound >> 1);
         }
 
-        return 65 - Long.numberOfLeadingZeros(
+        return 65L - Long.numberOfLeadingZeros(
                 // signed bounds go from (-n) to (n - 1), i.e. i8 goes from -128 to 127
                 bound < 0 ? Math.abs(bound) - 1 : bound);
     }
 
-    static String matchingIntType(boolean unsigned, Long inclusiveMin, Long inclusiveMax) {
+    private String matchingIntType(boolean unsigned, Long inclusiveMin, Long inclusiveMax) {
         long requiredMinBits = requiredBits(inclusiveMin, unsigned);
         long requiredMaxBits = requiredBits(inclusiveMax, unsigned);
         long requiredBits = Math.max(requiredMinBits, requiredMaxBits);
@@ -1057,44 +1214,48 @@ public class RustServerCodegen extends DefaultCodegen implements CodegenConfig {
                 // 'null'. This ensures that we treat this model as a struct
                 // with multiple parameters.
                 cm.dataType = null;
-            } else if (cm.dataType != null) {
-                if (cm.dataType.equals("map")) {
-                    // We don't yet support `additionalProperties`. We ignore
-                    // the `additionalProperties` type ('map') and warn the
-                    // user. This will produce code that compiles, but won't
-                    // feature the `additionalProperties`.
+            } else if (cm.dataType != null && cm.dataType.equals("map")) {
+                if (!cm.allVars.isEmpty() || cm.additionalPropertiesType == null) {
+                    // We don't yet support `additionalProperties` that also have
+                    // properties. If we see variables, we ignore the
+                    // `additionalProperties` type ('map') and warn the user. This
+                    // will produce code that compiles, but won't feature the
+                    // `additionalProperties` - but that's likely more useful to
+                    // the user than the alternative.
+                    LOGGER.warn("Ignoring additionalProperties (see https://github.com/OpenAPITools/openapi-generator/issues/318) alongside defined properties");
                     cm.dataType = null;
-                    LOGGER.warn("Ignoring unsupported additionalProperties (see https://github.com/OpenAPITools/openapi-generator/issues/318)");
-                } else {
-                    // We need to hack about with single-parameter models to
-                    // get them recognised correctly.
-                    cm.isAlias = false;
-                    cm.dataType = typeMapping.get(cm.dataType);
                 }
+                else
+                {
+                    String type;
+
+                    if (typeMapping.containsKey(cm.additionalPropertiesType)) {
+                        type = typeMapping.get(cm.additionalPropertiesType);
+                    } else {
+                        type = toModelName(cm.additionalPropertiesType);
+                    }
+
+                    cm.dataType = "HashMap<String, " + type + ">";
+                }
+            } else if (cm.dataType != null) {
+                // We need to hack about with single-parameter models to
+                // get them recognised correctly.
+                cm.isAlias = false;
+                cm.dataType = typeMapping.get(cm.dataType);
             }
+
+            cm.vendorExtensions.put("isString", "String".equals(cm.dataType));
         }
         return super.postProcessModelsEnum(objs);
     }
 
-    private boolean paramHasXmlNamespace(CodegenParameter param, Map<String, Schema> definitions) {
-        Object refName = param.vendorExtensions.get("refName");
-
-        if ((refName != null) && (refName instanceof String)) {
-            String name = (String) refName;
-            Schema model = definitions.get(ModelUtils.getSimpleRef(name));
-
-            if (model != null) {
-                XML xml = model.getXml();
-                if ((xml != null) && (xml.getNamespace() != null)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
     private void processParam(CodegenParameter param, CodegenOperation op) {
         String example = null;
+
+        // If a parameter uses UUIDs, we need to import the UUID package.
+        if (param.dataType.equals(uuidType)) {
+            additionalProperties.put("apiUsesUuid", true);
+        }
 
         if (param.isString) {
             param.vendorExtensions.put("formatString", "\\\"{}\\\"");

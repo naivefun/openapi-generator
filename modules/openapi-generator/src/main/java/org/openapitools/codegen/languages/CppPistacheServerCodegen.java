@@ -22,20 +22,30 @@ import io.swagger.v3.oas.models.media.ArraySchema;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.servers.Server;
+import io.swagger.v3.oas.models.OpenAPI;
 import org.apache.commons.lang3.StringUtils;
 import org.openapitools.codegen.*;
 import org.openapitools.codegen.utils.ModelUtils;
+import org.openapitools.codegen.utils.URLPathUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.util.*;
+import java.net.URL;
 
-import static org.openapitools.codegen.utils.StringUtils.underscore;
+import static org.openapitools.codegen.utils.StringUtils.*;
 
 public class CppPistacheServerCodegen extends AbstractCppCodegen {
+    private static final Logger LOGGER = LoggerFactory.getLogger(CppPistacheServerCodegen.class);
+
     protected String implFolder = "impl";
     protected boolean isAddExternalLibs = true;
+    protected boolean isUseStructModel = false;
     public static final String OPTIONAL_EXTERNAL_LIB = "addExternalLibs";
     public static final String OPTIONAL_EXTERNAL_LIB_DESC = "Add the Possibility to fetch and compile external Libraries needed by this Framework.";
+    public static final String OPTION_USE_STRUCT_MODEL = "useStructModel";
+    public static final String OPTION_USE_STRUCT_MODEL_DESC = "Use struct-based model template instead of get/set-based model template";
     public static final String HELPERS_PACKAGE_NAME = "helpersPackage";
     public static final String HELPERS_PACKAGE_NAME_DESC = "Specify the package name to be used for the helpers (e.g. org.openapitools.server.helpers).";
     protected final String PREFIX = "";
@@ -65,9 +75,6 @@ public class CppPistacheServerCodegen extends AbstractCppCodegen {
         apiPackage = "org.openapitools.server.api";
         modelPackage = "org.openapitools.server.model";
 
-        modelTemplateFiles.put("model-header.mustache", ".h");
-        modelTemplateFiles.put("model-source.mustache", ".cpp");
-
         apiTemplateFiles.put("api-header.mustache", ".h");
         apiTemplateFiles.put("api-source.mustache", ".cpp");
         apiTemplateFiles.put("api-impl-header.mustache", ".h");
@@ -78,11 +85,10 @@ public class CppPistacheServerCodegen extends AbstractCppCodegen {
         cliOptions.clear();
         addSwitch(OPTIONAL_EXTERNAL_LIB, OPTIONAL_EXTERNAL_LIB_DESC, this.isAddExternalLibs);
         addOption(HELPERS_PACKAGE_NAME, HELPERS_PACKAGE_NAME_DESC, this.helpersPackage);
+        addSwitch(OPTION_USE_STRUCT_MODEL, OPTION_USE_STRUCT_MODEL_DESC, this.isUseStructModel);
 
         reservedWords = new HashSet<>();
 
-        supportingFiles.add(new SupportingFile("modelbase-header.mustache", "model", modelNamePrefix + "ModelBase.h"));
-        supportingFiles.add(new SupportingFile("modelbase-source.mustache", "model", modelNamePrefix + "ModelBase.cpp"));
         supportingFiles.add(new SupportingFile("helpers-header.mustache", "model", modelNamePrefix + "Helpers.h"));
         supportingFiles.add(new SupportingFile("helpers-source.mustache", "model", modelNamePrefix + "Helpers.cpp"));
         supportingFiles.add(new SupportingFile("main-api-server.mustache", "", modelNamePrefix + "main-api-server.cpp"));
@@ -106,6 +112,7 @@ public class CppPistacheServerCodegen extends AbstractCppCodegen {
         typeMapping.put("binary", "std::string");
         typeMapping.put("number", "double");
         typeMapping.put("UUID", "std::string");
+        typeMapping.put("URI", "std::string");
         typeMapping.put("ByteArray", "std::string");
 
         super.importMapping = new HashMap<String, String>();
@@ -124,8 +131,6 @@ public class CppPistacheServerCodegen extends AbstractCppCodegen {
         if (additionalProperties.containsKey("modelNamePrefix")) {
             additionalProperties().put("prefix", modelNamePrefix);
             supportingFiles.clear();
-            supportingFiles.add(new SupportingFile("modelbase-header.mustache", "model", modelNamePrefix + "ModelBase.h"));
-            supportingFiles.add(new SupportingFile("modelbase-source.mustache", "model", modelNamePrefix + "ModelBase.cpp"));
             supportingFiles.add(new SupportingFile("helpers-header.mustache", "model", modelNamePrefix + "Helpers.h"));
             supportingFiles.add(new SupportingFile("helpers-source.mustache", "model", modelNamePrefix + "Helpers.cpp"));
             supportingFiles.add(new SupportingFile("main-api-server.mustache", "", modelNamePrefix + "main-api-server.cpp"));
@@ -143,6 +148,23 @@ public class CppPistacheServerCodegen extends AbstractCppCodegen {
             setAddExternalLibs(convertPropertyToBooleanAndWriteBack(OPTIONAL_EXTERNAL_LIB));
         } else {
             additionalProperties.put(OPTIONAL_EXTERNAL_LIB, isAddExternalLibs);
+        }
+
+        setupModelTemplate();
+    }
+
+    private void setupModelTemplate() {
+        if (additionalProperties.containsKey(OPTION_USE_STRUCT_MODEL))
+            isUseStructModel = convertPropertyToBooleanAndWriteBack(OPTION_USE_STRUCT_MODEL);
+
+        if (isUseStructModel) {
+            LOGGER.info("Using struct-based model template");
+            modelTemplateFiles.put("model-struct-header.mustache", ".h");
+            modelTemplateFiles.put("model-struct-source.mustache", ".cpp");
+        } else {
+            LOGGER.info("Using get/set-based model template");
+            modelTemplateFiles.put("model-header.mustache", ".h");
+            modelTemplateFiles.put("model-source.mustache", ".cpp");
         }
     }
 
@@ -265,7 +287,7 @@ public class CppPistacheServerCodegen extends AbstractCppCodegen {
 
     @Override
     public String toModelFilename(String name) {
-        return initialCaps(toModelName(name));
+        return toModelName(name);
     }
 
     @Override
@@ -286,7 +308,7 @@ public class CppPistacheServerCodegen extends AbstractCppCodegen {
 
     @Override
     public String toApiFilename(String name) {
-        return  modelNamePrefix + initialCaps(name) + "Api";
+        return toApiName(name);
     }
 
     /**
